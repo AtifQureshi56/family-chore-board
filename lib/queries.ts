@@ -1,0 +1,402 @@
+import 'server-only';
+import { createServiceClient } from './supabase';
+import { addDays, monthRange } from './dates';
+import {
+  completedCount,
+  dayTotal,
+  dayAvailable,
+  groupBySlot,
+  isPerfectDay,
+} from './scoring';
+import type {
+  Child,
+  ChildDay,
+  DayTask,
+  DayTotal,
+  LatestCompletion,
+  MonthTotal,
+  Task,
+  TvChild,
+} from './types';
+
+const TASK_COLUMNS =
+  'id,title,icon,slot,points,sort_order,is_active,child_id,on_date,created_on';
+
+/**
+ * THE visibility rule. Every "which chores does this child have on this date"
+ * calculation must go through here - the day view, the picker badges, the
+ * progress ring, the perfect-day check and the TV board. Duplicating this
+ * predicate anywhere is how the ring and the celebration end up disagreeing.
+ *
+ *   child_id null      -> shared default chore, everyone sees it
+ *   child_id match     -> extra chore for this child
+ *   on_date  null      -> recurring
+ *   on_date  match     -> one-off for this date
+ *   created_on <= date -> a chore added today cannot un-perfect a past day
+ */
+export async function getVisibleTasks(childId: string, date: string): Promise<Task[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('tasks')
+    .select(TASK_COLUMNS)
+    .eq('is_active', true)
+    .or(`child_id.is.null,child_id.eq.${childId}`)
+    .or(`on_date.is.null,on_date.eq.${date}`)
+    .lte('created_on', date)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Task[];
+}
+
+export async function getActiveChildren(): Promise<Child[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('children')
+    .select('*')
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Child[];
+}
+
+/** Every child including the removed ones - the parent zone needs to see both. */
+export async function getAllChildren(): Promise<Child[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('children')
+    .select('*')
+    .order('is_active', { ascending: false })
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Child[];
+}
+
+/** The shared default list every child sees: child_id is null. */
+export async function getSharedTasks(): Promise<Task[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('tasks')
+    .select(TASK_COLUMNS)
+    .is('child_id', null)
+    .eq('is_active', true)
+    .order('slot', { ascending: true })
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Task[];
+}
+
+/**
+ * The extra chores added for one specific child. One-off chores whose date has
+ * already passed are hidden - they are history, not something to manage.
+ */
+export async function getExtraChores(childId: string, today: string): Promise<Task[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('tasks')
+    .select(TASK_COLUMNS)
+    .eq('child_id', childId)
+    .eq('is_active', true)
+    .or(`on_date.is.null,on_date.gte.${today}`)
+    .order('slot', { ascending: true })
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Task[];
+}
+
+export async function getChild(childId: string): Promise<Child | null> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('children')
+    .select('*')
+    .eq('id', childId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data as Child) ?? null;
+}
+
+/** Active tasks joined with that child's completions for the date. */
+export async function getDayForChild(childId: string, date: string): Promise<ChildDay | null> {
+  const db = createServiceClient();
+
+  const [child, tasks, completionsResult] = await Promise.all([
+    getChild(childId),
+    getVisibleTasks(childId, date),
+    db
+      .from('completions')
+      .select('task_id,points_awarded')
+      .eq('child_id', childId)
+      .eq('completed_on', date),
+  ]);
+
+  if (!child) return null;
+  if (completionsResult.error) throw completionsResult.error;
+
+  const done = new Set((completionsResult.data ?? []).map((c) => c.task_id as string));
+
+  const dayTasks: DayTask[] = tasks.map((t) => ({
+    ...t,
+    completed: done.has(t.id),
+    is_extra: t.child_id !== null,
+  }));
+
+  return {
+    child,
+    date,
+    slots: groupBySlot(dayTasks),
+    total: dayAvailable(dayTasks),
+    earned: dayTotal(dayTasks),
+    completedCount: completedCount(dayTasks),
+    taskCount: dayTasks.length,
+    isPerfect: isPerfectDay(dayTasks),
+  };
+}
+
+/** Points per child for one date - powers the picker badges. */
+export async function getDayTotals(date: string): Promise<Record<string, DayTotal>> {
+  const db = createServiceClient();
+  const children = await getActiveChildren();
+
+  const [completionsResult, taskLists] = await Promise.all([
+    db.from('completions').select('child_id,points_awarded').eq('completed_on', date),
+    Promise.all(children.map((c) => getVisibleTasks(c.id, date))),
+  ]);
+  if (completionsResult.error) throw completionsResult.error;
+
+  const totals: Record<string, DayTotal> = {};
+  children.forEach((child, i) => {
+    totals[child.id] = {
+      child_id: child.id,
+      points: 0,
+      completedCount: 0,
+      taskCount: taskLists[i].length,
+    };
+  });
+
+  for (const row of completionsResult.data ?? []) {
+    const entry = totals[row.child_id as string];
+    if (!entry) continue;
+    entry.points += row.points_awarded as number;
+    entry.completedCount += 1;
+  }
+
+  return totals;
+}
+
+/** Points per child for a calendar month, plus that month's perfect-day count. */
+export async function getMonthTotals(
+  year: number,
+  month: number,
+): Promise<Record<string, MonthTotal>> {
+  const db = createServiceClient();
+  const { start, end } = monthRange(year, month);
+
+  const [completions, perfect] = await Promise.all([
+    db
+      .from('completions')
+      .select('child_id,points_awarded')
+      .gte('completed_on', start)
+      .lte('completed_on', end),
+    db.from('perfect_days').select('child_id').gte('on_date', start).lte('on_date', end),
+  ]);
+  if (completions.error) throw completions.error;
+  if (perfect.error) throw perfect.error;
+
+  const totals: Record<string, MonthTotal> = {};
+  const bump = (id: string): MonthTotal => {
+    totals[id] ??= { child_id: id, points: 0, perfectDays: 0 };
+    return totals[id];
+  };
+
+  for (const row of completions.data ?? []) {
+    bump(row.child_id as string).points += row.points_awarded as number;
+  }
+  for (const row of perfect.data ?? []) {
+    bump(row.child_id as string).perfectDays += 1;
+  }
+
+  return totals;
+}
+
+/** Every perfect day for a child within a date range - powers the calendar grid. */
+export async function getPerfectDays(
+  childId: string,
+  start: string,
+  end: string,
+): Promise<string[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('perfect_days')
+    .select('on_date')
+    .eq('child_id', childId)
+    .gte('on_date', start)
+    .lte('on_date', end)
+    .order('on_date', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []).map((r) => r.on_date as string);
+}
+
+/** Perfect days for every child in one range, keyed by child id. One round trip. */
+export async function getPerfectDaysByChild(
+  start: string,
+  end: string,
+): Promise<Record<string, string[]>> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('perfect_days')
+    .select('child_id,on_date')
+    .gte('on_date', start)
+    .lte('on_date', end);
+
+  if (error) throw error;
+
+  const out: Record<string, string[]> = {};
+  for (const row of data ?? []) {
+    (out[row.child_id as string] ??= []).push(row.on_date as string);
+  }
+  return out;
+}
+
+/**
+ * Current streak for every child, in one round trip.
+ *
+ * A streak can span months, so this cannot be derived from the month view - it
+ * reads back from today until the first gap.
+ */
+export async function getStreaksByChild(today: string): Promise<Record<string, number>> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('perfect_days')
+    .select('child_id,on_date')
+    .lte('on_date', today)
+    .order('on_date', { ascending: false })
+    .limit(2000);
+
+  if (error) throw error;
+
+  const byChild: Record<string, Set<string>> = {};
+  for (const row of data ?? []) {
+    (byChild[row.child_id as string] ??= new Set()).add(row.on_date as string);
+  }
+
+  const streaks: Record<string, number> = {};
+  for (const [childId, days] of Object.entries(byChild)) {
+    // Yesterday is a valid anchor: a streak should not read as broken at 09:00,
+    // before the child has had any chance to do anything today.
+    let cursor = days.has(today) ? today : addDays(today, -1);
+    let streak = 0;
+    while (days.has(cursor)) {
+      streak += 1;
+      cursor = addDays(cursor, -1);
+    }
+    streaks[childId] = streak;
+  }
+
+  return streaks;
+}
+
+/**
+ * Consecutive perfect days ending today or yesterday. Yesterday counts as the
+ * anchor too - a streak should not read as broken at 09:00, before the child has
+ * had any chance to do anything today.
+ */
+export async function getPerfectDayStreak(childId: string, today: string): Promise<number> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('perfect_days')
+    .select('on_date')
+    .eq('child_id', childId)
+    .lte('on_date', today)
+    .order('on_date', { ascending: false })
+    .limit(400);
+
+  if (error) throw error;
+  const days = new Set((data ?? []).map((r) => r.on_date as string));
+  if (days.size === 0) return 0;
+
+  let cursor = days.has(today) ? today : addDays(today, -1);
+  let streak = 0;
+  while (days.has(cursor)) {
+    streak += 1;
+    cursor = addDays(cursor, -1);
+  }
+  return streak;
+}
+
+/**
+ * Everything the TV board needs, in as few round trips as possible. The TV polls
+ * this every 30 seconds indefinitely, so an N+1 here would quietly consume the
+ * Supabase free tier.
+ */
+export async function getTvBoardData(date: string): Promise<TvChild[]> {
+  const db = createServiceClient();
+  const { start, end } = monthRange(Number(date.slice(0, 4)), Number(date.slice(5, 7)));
+  const children = await getActiveChildren();
+  if (children.length === 0) return [];
+
+  const [today, month, perfect, taskLists] = await Promise.all([
+    db.from('completions').select('child_id,points_awarded').eq('completed_on', date),
+    db
+      .from('completions')
+      .select('child_id,points_awarded')
+      .gte('completed_on', start)
+      .lte('completed_on', end),
+    db.from('perfect_days').select('child_id').eq('on_date', date),
+    Promise.all(children.map((c) => getVisibleTasks(c.id, date))),
+  ]);
+  if (today.error) throw today.error;
+  if (month.error) throw month.error;
+  if (perfect.error) throw perfect.error;
+
+  const perfectIds = new Set((perfect.data ?? []).map((r) => r.child_id as string));
+
+  return children.map((child, i) => {
+    const dayRows = (today.data ?? []).filter((r) => r.child_id === child.id);
+    const monthPoints = (month.data ?? [])
+      .filter((r) => r.child_id === child.id)
+      .reduce((sum, r) => sum + (r.points_awarded as number), 0);
+
+    return {
+      child,
+      points: dayRows.reduce((sum, r) => sum + (r.points_awarded as number), 0),
+      completedCount: dayRows.length,
+      taskCount: taskLists[i].length,
+      isPerfect: perfectIds.has(child.id),
+      monthPoints,
+    };
+  });
+}
+
+/** Most recent completion, for the TV activity strip. */
+export async function getLatestCompletion(date: string): Promise<LatestCompletion | null> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('completions')
+    .select('created_at,points_awarded,children(name,color),tasks(title,icon)')
+    .eq('completed_on', date)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  const child = data.children as unknown as { name: string; color: string } | null;
+  const task = data.tasks as unknown as { title: string; icon: string } | null;
+  if (!child || !task) return null;
+
+  return {
+    childName: child.name,
+    childColor: child.color,
+    taskTitle: task.title,
+    taskIcon: task.icon,
+    points: data.points_awarded as number,
+    at: data.created_at as string,
+  };
+}
