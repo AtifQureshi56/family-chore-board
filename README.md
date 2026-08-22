@@ -51,6 +51,26 @@ a date outside `lib/dates.ts`.
 | `npm run icons` | Regenerate the PWA icons from the SVG in `scripts/icons.ts` |
 | `npm run check` | Verify Supabase keys, tables and browser-key lockdown |
 
+## Deploying to Vercel
+
+The repo lives at https://github.com/AtifQureshi56/family-chore-board (private).
+
+1. Go to https://vercel.com/new and import that repo. Vercel detects Next.js on
+   its own — leave every build setting alone.
+2. **Before clicking Deploy**, open *Environment Variables* and add all three,
+   copied from your local `.env.local`:
+
+   | Name | Where it comes from |
+   |---|---|
+   | `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Settings → API |
+   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | the publishable key |
+   | `SUPABASE_SERVICE_ROLE_KEY` | the secret key — **never** rename this to `NEXT_PUBLIC_*` |
+
+   Apply them to Production, Preview and Development.
+3. Deploy. Every push to `main` redeploys from then on.
+
+`SEED_PARENT_PIN` is not needed on Vercel — the seed script only ever runs locally.
+
 ## Installing to the tablet
 
 The PWA bits are done: manifest, icons, `display: standalone`, and a service
