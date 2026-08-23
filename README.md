@@ -102,6 +102,31 @@ Every "which chores does this child have today" calculation goes through
 
 ## Build phases
 
-See `chore-board-spec.md` section 8. Current state: **Phase 6 (delight + PWA) complete** — deploy still to do.
+See `chore-board-spec.md` section 8. Current state: **all seven phases complete**.
 
-Phase 7 (the TV board) is not built yet.
+The remaining validation is the spec's own Phase 7 criterion: run the board
+unattended for 24 hours, survive a wifi drop, and confirm it updates within 30
+seconds of a chore being checked on the tablet.
+
+## The TV board
+
+`/tv` is a read-only wall display for a shared family space. No PIN, no
+navigation, and no interactive elements at all — a TV remote cannot usefully
+operate a web UI, so nothing responds to input.
+
+It is drawn on a fixed 1920x1080 canvas scaled to fit whatever the screen
+reports, with 5% padding on all sides to survive overscan cropping.
+
+Two independent sync mechanisms, both required:
+
+| Mechanism | Purpose |
+|---|---|
+| Supabase Realtime on `completions` | Instant updates and the activity strip |
+| 30s full refetch of `/api/tv` | Fallback for dropped websockets — cheap TV hardware and overnight wifi blips make this non-optional |
+
+It also refetches whenever the tab becomes visible, shows "Reconnecting..."
+rather than going quietly stale, nudges the layout 1-3px each minute against
+burn-in, dims after 21:00 (`?dim=22` to change), and hard-reloads at 04:00
+because long-lived tabs leak memory and eventually freeze.
+
+Validate on an HDMI cable before buying any hardware.

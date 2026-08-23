@@ -340,7 +340,10 @@ export async function getTvBoardData(date: string): Promise<TvChild[]> {
   const children = await getActiveChildren();
   if (children.length === 0) return [];
 
-  const [today, month, perfect, taskLists] = await Promise.all([
+  // Four queries, regardless of how many children are on the board. The TV polls
+  // this every 30 seconds forever, so the per-child loop that used to live here
+  // was an N+1 that would quietly eat the Supabase free tier.
+  const [today, month, perfect, tasks] = await Promise.all([
     db.from('completions').select('child_id,points_awarded').eq('completed_on', date),
     db
       .from('completions')
@@ -348,27 +351,55 @@ export async function getTvBoardData(date: string): Promise<TvChild[]> {
       .gte('completed_on', start)
       .lte('completed_on', end),
     db.from('perfect_days').select('child_id').eq('on_date', date),
-    Promise.all(children.map((c) => getVisibleTasks(c.id, date))),
+    db
+      .from('tasks')
+      .select('id,child_id')
+      .eq('is_active', true)
+      .or(`on_date.is.null,on_date.eq.${date}`)
+      .lte('created_on', date),
   ]);
   if (today.error) throw today.error;
   if (month.error) throw month.error;
   if (perfect.error) throw perfect.error;
+  if (tasks.error) throw tasks.error;
 
   const perfectIds = new Set((perfect.data ?? []).map((r) => r.child_id as string));
 
-  return children.map((child, i) => {
-    const dayRows = (today.data ?? []).filter((r) => r.child_id === child.id);
-    const monthPoints = (month.data ?? [])
-      .filter((r) => r.child_id === child.id)
-      .reduce((sum, r) => sum + (r.points_awarded as number), 0);
+  // Mirrors getVisibleTasks: a shared chore (null child_id) counts for everyone,
+  // an extra chore counts only for the child it belongs to.
+  const sharedCount = (tasks.data ?? []).filter((t) => t.child_id === null).length;
+  const extrasByChild = new Map<string, number>();
+  for (const task of tasks.data ?? []) {
+    if (task.child_id) {
+      extrasByChild.set(task.child_id as string, (extrasByChild.get(task.child_id as string) ?? 0) + 1);
+    }
+  }
 
+  const dayByChild = new Map<string, { points: number; count: number }>();
+  for (const row of today.data ?? []) {
+    const entry = dayByChild.get(row.child_id as string) ?? { points: 0, count: 0 };
+    entry.points += row.points_awarded as number;
+    entry.count += 1;
+    dayByChild.set(row.child_id as string, entry);
+  }
+
+  const monthByChild = new Map<string, number>();
+  for (const row of month.data ?? []) {
+    monthByChild.set(
+      row.child_id as string,
+      (monthByChild.get(row.child_id as string) ?? 0) + (row.points_awarded as number),
+    );
+  }
+
+  return children.map((child) => {
+    const day = dayByChild.get(child.id) ?? { points: 0, count: 0 };
     return {
       child,
-      points: dayRows.reduce((sum, r) => sum + (r.points_awarded as number), 0),
-      completedCount: dayRows.length,
-      taskCount: taskLists[i].length,
+      points: day.points,
+      completedCount: day.count,
+      taskCount: sharedCount + (extrasByChild.get(child.id) ?? 0),
       isPerfect: perfectIds.has(child.id),
-      monthPoints,
+      monthPoints: monthByChild.get(child.id) ?? 0,
     };
   });
 }
