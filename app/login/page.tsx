@@ -1,4 +1,5 @@
 import SignInButtons from '@/components/SignInButtons';
+import { getUser } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,9 +11,12 @@ export const metadata = {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; switch?: string }>;
 }) {
   const { next } = await searchParams;
+  // Reached with ?switch=1 while still signed in: name the account being left, so
+  // nobody signs a second family in on top of the first without noticing.
+  const current = await getUser();
   // Only in-app paths, never an absolute URL: an open redirect here would let a
   // crafted link bounce a freshly signed-in parent off to someone else's site.
   const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : undefined;
@@ -29,6 +33,13 @@ export default async function LoginPage({
           your account.
         </p>
       </header>
+
+      {current && (
+        <p className="w-full rounded-2xl bg-surface p-4 text-center font-semibold text-muted shadow-sm ring-1 ring-black/5">
+          This device is signed in as <span className="text-foreground">{current.email}</span>. Signing in
+          below swaps the board over to the account you choose.
+        </p>
+      )}
 
       <SignInButtons next={safeNext} />
 

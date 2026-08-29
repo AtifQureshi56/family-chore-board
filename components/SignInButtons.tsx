@@ -25,7 +25,13 @@ export default function SignInButtons({ next }: { next?: string }) {
 
         const { error: authError } = await supabase.auth.signInWithOAuth({
           provider: 'google',
-          options: { redirectTo: callback.toString() },
+          options: {
+            redirectTo: callback.toString(),
+            // Google reuses the last account silently unless asked. On a shared
+            // tablet - or a parent adding a second family - that means signing in
+            // as somebody else without ever being offered the choice.
+            queryParams: { prompt: 'select_account' },
+          },
         });
         if (authError) setError(authError.message);
       } catch (err) {

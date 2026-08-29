@@ -55,8 +55,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(login);
   }
 
-  // A signed-in parent has no use for the sign-in screen.
-  if (user && path === '/login') {
+  // A signed-in parent has no use for the sign-in screen - unless they came to
+  // hand the device to a different account, which ?switch=1 says explicitly.
+  // Without that door, whoever is signed in on a browser stays signed in, and the
+  // next person silently gets their board.
+  if (user && path === '/login' && request.nextUrl.searchParams.get('switch') !== '1') {
     const home = request.nextUrl.clone();
     home.pathname = '/';
     home.search = '';

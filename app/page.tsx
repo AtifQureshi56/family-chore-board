@@ -8,7 +8,7 @@ import { formatLongDate, todayInKarachi } from '@/lib/dates';
 export const dynamic = 'force-dynamic';
 
 export default async function PickerPage() {
-  const { familyId } = await requireFamily();
+  const { familyId, email } = await requireFamily();
   const today = todayInKarachi();
   const [children, totals] = await Promise.all([
     getActiveChildren(familyId),
@@ -41,7 +41,7 @@ export default async function PickerPage() {
         </div>
       )}
 
-      <nav className="mt-auto flex justify-center gap-4 pb-4">
+      <nav className="mt-auto flex justify-center gap-4">
         <Link
           href="/scoreboard"
           className="grid h-16 place-items-center rounded-2xl bg-surface px-6 text-lg font-bold shadow-sm ring-1 ring-black/5 active:scale-[0.98]"
@@ -55,6 +55,13 @@ export default async function PickerPage() {
           🔒 Parents
         </Link>
       </nav>
+
+      <p className="pb-4 text-center text-sm font-semibold text-muted">
+        Signed in as {email ?? 'this account'} ·{' '}
+        <Link href="/login?switch=1" className="underline underline-offset-2">
+          Not you?
+        </Link>
+      </p>
     </main>
   );
 }
