@@ -7,25 +7,25 @@
  * ever disagree, the TV shows a different total from the tablet.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { type SupabaseClient } from '@supabase/supabase-js';
 import { getLatestCompletion, getTvBoardData, getVisibleTasks } from '../lib/queries';
 import { performToggle } from '../lib/toggle';
 import { addDays, todayInKarachi } from '../lib/dates';
+import { configured, createTestFamily, deleteTestFamily, testDb } from './helpers/family';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const describeIf = url && secret ? describe : describe.skip;
+const describeIf = configured ? describe : describe.skip;
 
 let db: SupabaseClient;
+let familyId = '';
 let childA = '';
 let childB = '';
-const created: string[] = [];
 const today = todayInKarachi();
 
 async function makeTask(fields: Record<string, unknown>): Promise<string> {
   const { data, error } = await db
     .from('tasks')
     .insert({
+      family_id: familyId,
       title: '__test__ tv chore',
       icon: '🧪',
       slot: 'morning',
@@ -37,19 +37,19 @@ async function makeTask(fields: Record<string, unknown>): Promise<string> {
     .select('id')
     .single();
   if (error) throw error;
-  created.push(data!.id as string);
   return data!.id as string;
 }
 
 describeIf('tv board (integration)', () => {
   beforeAll(async () => {
-    db = createClient(url!, secret!, { auth: { persistSession: false } });
+    db = testDb();
+    familyId = await createTestFamily(db, 'tv');
 
     const { data } = await db
       .from('children')
       .insert([
-        { name: '__test__ TV1', color: '#111111', avatar: '🧪', sort_order: 990 },
-        { name: '__test__ TV2', color: '#222222', avatar: '🧪', sort_order: 991 },
+        { family_id: familyId, name: '__test__ TV1', color: '#111111', avatar: '🧪', sort_order: 990 },
+        { family_id: familyId, name: '__test__ TV2', color: '#222222', avatar: '🧪', sort_order: 991 },
       ])
       .select('id');
 
@@ -58,8 +58,7 @@ describeIf('tv board (integration)', () => {
   });
 
   afterAll(async () => {
-    if (created.length) await db.from('tasks').delete().in('id', created);
-    await db.from('children').delete().in('id', [childA, childB].filter(Boolean));
+    await deleteTestFamily(db, familyId);
   });
 
   it('agrees with getVisibleTasks on every child, including extras', async () => {
@@ -68,11 +67,11 @@ describeIf('tv board (integration)', () => {
     await makeTask({ child_id: childA, on_date: today });
     await makeTask({ child_id: childB });
 
-    const board = await getTvBoardData(today);
+    const board = await getTvBoardData(familyId, today);
     expect(board.length).toBeGreaterThanOrEqual(2);
 
     for (const row of board) {
-      const visible = await getVisibleTasks(row.child.id, today);
+      const visible = await getVisibleTasks(familyId, row.child.id, today);
       expect(row.taskCount).toBe(visible.length);
     }
   });
@@ -80,9 +79,9 @@ describeIf('tv board (integration)', () => {
   it('excludes a one-off chore dated yesterday', async () => {
     const stale = await makeTask({ child_id: childA, on_date: addDays(today, -1) });
 
-    const board = await getTvBoardData(today);
+    const board = await getTvBoardData(familyId, today);
     const rowA = board.find((r) => r.child.id === childA)!;
-    const visible = await getVisibleTasks(childA, today);
+    const visible = await getVisibleTasks(familyId, childA, today);
 
     expect(rowA.taskCount).toBe(visible.length);
     expect(visible.map((t) => t.id)).not.toContain(stale);
@@ -90,19 +89,19 @@ describeIf('tv board (integration)', () => {
 
   it('excludes a soft-deleted chore', async () => {
     const removed = await makeTask({ child_id: childB });
-    const before = (await getTvBoardData(today)).find((r) => r.child.id === childB)!.taskCount;
+    const before = (await getTvBoardData(familyId, today)).find((r) => r.child.id === childB)!.taskCount;
 
     await db.from('tasks').update({ is_active: false }).eq('id', removed);
 
-    const after = (await getTvBoardData(today)).find((r) => r.child.id === childB)!.taskCount;
+    const after = (await getTvBoardData(familyId, today)).find((r) => r.child.id === childB)!.taskCount;
     expect(after).toBe(before - 1);
   });
 
   it("reports today's points, completed count and month total", async () => {
     const task = await makeTask({ child_id: childA, points: 7 });
-    await performToggle({ childId: childA, taskId: task, date: today, today });
+    await performToggle({ familyId, childId: childA, taskId: task, date: today, today });
 
-    const rowA = (await getTvBoardData(today)).find((r) => r.child.id === childA)!;
+    const rowA = (await getTvBoardData(familyId, today)).find((r) => r.child.id === childA)!;
     expect(rowA.points).toBeGreaterThanOrEqual(7);
     expect(rowA.completedCount).toBeGreaterThanOrEqual(1);
     expect(rowA.monthPoints).toBeGreaterThanOrEqual(rowA.points);
@@ -113,9 +112,9 @@ describeIf('tv board (integration)', () => {
 
   it('getLatestCompletion carries the names the activity strip needs', async () => {
     const task = await makeTask({ child_id: childA, points: 5, title: '__test__ take a shower' });
-    await performToggle({ childId: childA, taskId: task, date: today, today });
+    await performToggle({ familyId, childId: childA, taskId: task, date: today, today });
 
-    const latest = await getLatestCompletion(today);
+    const latest = await getLatestCompletion(familyId, today);
     expect(latest).not.toBeNull();
     expect(latest!.childName).toBe('__test__ TV1');
     expect(latest!.taskTitle).toBe('__test__ take a shower');
@@ -126,7 +125,7 @@ describeIf('tv board (integration)', () => {
   });
 
   it('a child with no chores at all is never marked perfect', async () => {
-    const board = await getTvBoardData(today);
+    const board = await getTvBoardData(familyId, today);
     for (const row of board) {
       if (row.taskCount === 0) expect(row.isPerfect).toBe(false);
     }

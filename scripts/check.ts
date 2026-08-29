@@ -16,7 +16,15 @@ if (!url || !secret || !publishable) {
   process.exit(1);
 }
 
-const TABLES = ['children', 'tasks', 'completions', 'perfect_days', 'settings'] as const;
+const TABLES = [
+  'families',
+  'family_members',
+  'children',
+  'tasks',
+  'completions',
+  'perfect_days',
+  'settings',
+] as const;
 
 const server = createClient(url, secret, { auth: { persistSession: false } });
 const browser = createClient(url, publishable, { auth: { persistSession: false } });
@@ -39,7 +47,7 @@ async function main() {
     else console.log(`  ${label} -> ${data}`);
   }
 
-  console.log('\nServer access (needs all five)');
+  console.log(`\nServer access (needs all ${TABLES.length})`);
   for (const table of TABLES) {
     const { data, error } = await server.from(table).select('*').limit(1);
     if (error) fail(`${table}: ${error.message}`);
@@ -47,14 +55,15 @@ async function main() {
     void data;
   }
 
-  console.log('\nBrowser access (completions only)');
-  const completions = await browser.from('completions').select('*').limit(1);
-  if (completions.error) fail(`completions should be readable: ${completions.error.message}`);
-  else pass('completions readable (needed for the TV board realtime feed)');
-
-  for (const table of ['children', 'tasks', 'perfect_days', 'settings'] as const) {
+  // Before families existed, `anon` could read every completion row so the TV
+  // board's realtime feed would fire. With more than one family in the database
+  // that is a cross-tenant leak, so the feed now runs as the signed-in parent and
+  // an anonymous key must reach nothing at all.
+  console.log('\nBrowser access (an unauthenticated key must see nothing)');
+  for (const table of TABLES) {
     const { data, error } = await browser.from(table).select('*').limit(1);
-    // RLS with no policy returns an empty set rather than an error; both are locked.
+    // RLS with no matching policy returns an empty set rather than an error;
+    // both mean locked.
     if (error || (data ?? []).length === 0) pass(`${table} not exposed to the browser`);
     else fail(`${table} IS READABLE FROM THE BROWSER`);
   }

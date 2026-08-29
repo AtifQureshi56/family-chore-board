@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { createServiceClient } from '@/lib/supabase';
 import { todayInKarachi } from '@/lib/dates';
-import { requireParent } from '@/lib/parentSession';
+import { requireParentZone } from '@/lib/parentSession';
 import { SLOTS, type Slot } from '@/lib/types';
 
 export type ExtraChoreInput = {
@@ -26,7 +26,7 @@ export type ExtraChoreInput = {
 export async function addExtraChore(
   input: ExtraChoreInput,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   const title = input.title.trim();
   if (!title) return { ok: false, error: 'Give the chore a name.' };
@@ -42,10 +42,12 @@ export async function addExtraChore(
   const today = todayInKarachi();
   const onDate = input.todayOnly ? today : null;
 
+  // Confirms the child is on THIS family's board, not just that the id exists.
   const { data: child } = await db
     .from('children')
     .select('id')
     .eq('id', input.childId)
+    .eq('family_id', familyId)
     .eq('is_active', true)
     .maybeSingle();
   if (!child) return { ok: false, error: 'That child is not on the board.' };
@@ -54,6 +56,7 @@ export async function addExtraChore(
   const duplicate = db
     .from('tasks')
     .select('id')
+    .eq('family_id', familyId)
     .eq('child_id', input.childId)
     .eq('slot', input.slot)
     .eq('title', title)
@@ -71,12 +74,14 @@ export async function addExtraChore(
   const { data: last } = await db
     .from('tasks')
     .select('sort_order')
+    .eq('family_id', familyId)
     .eq('slot', input.slot)
     .order('sort_order', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   const { error } = await db.from('tasks').insert({
+    family_id: familyId,
     title,
     icon: input.icon || '⭐',
     slot: input.slot,
@@ -100,7 +105,7 @@ export async function addExtraChore(
  * removing the row would erase points the child has already earned.
  */
 export async function removeExtraChore(taskId: string): Promise<{ ok: boolean; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   const db = createServiceClient();
 
@@ -108,6 +113,7 @@ export async function removeExtraChore(taskId: string): Promise<{ ok: boolean; e
     .from('tasks')
     .select('id,child_id')
     .eq('id', taskId)
+    .eq('family_id', familyId)
     .maybeSingle();
 
   if (!task) return { ok: false, error: 'That chore no longer exists.' };
@@ -115,7 +121,11 @@ export async function removeExtraChore(taskId: string): Promise<{ ok: boolean; e
     return { ok: false, error: 'That is a shared chore. Remove it from the chore list instead.' };
   }
 
-  const { error } = await db.from('tasks').update({ is_active: false }).eq('id', taskId);
+  const { error } = await db
+    .from('tasks')
+    .update({ is_active: false })
+    .eq('id', taskId)
+    .eq('family_id', familyId);
   if (error) return { ok: false, error: error.message };
 
   revalidatePath('/parent');

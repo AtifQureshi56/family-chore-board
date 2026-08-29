@@ -2,19 +2,17 @@
  * The acceptance tests from chore-board-spec.md section 9, run against the real
  * Supabase project.
  *
- * These create and delete their own children and tasks, prefixed `__test__`, and
- * clean up after themselves. They never touch the seeded family's data.
+ * These run inside their own throwaway family, so nothing here can see - or be
+ * disturbed by - any other family's board. Deleting the family at the end
+ * cascades to every row they created.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { type SupabaseClient } from '@supabase/supabase-js';
 import { performToggle } from '../lib/toggle';
 import { getDayForChild, getPerfectDayStreak, getVisibleTasks } from '../lib/queries';
 import { addDays, todayInKarachi } from '../lib/dates';
+import { configured, createTestFamily, deleteTestFamily, testDb } from './helpers/family';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-const configured = Boolean(url && secret);
 const describeIf = configured ? describe : describe.skip;
 
 let db: SupabaseClient;
@@ -22,6 +20,7 @@ const today = todayInKarachi();
 const yesterday = addDays(today, -1);
 
 // Created in beforeAll
+let familyId = '';
 let childA = '';
 let childB = '';
 let sharedTaskId = '';
@@ -30,7 +29,7 @@ let sharedTask2Id = '';
 async function makeChild(name: string): Promise<string> {
   const { data, error } = await db
     .from('children')
-    .insert({ name, color: '#123456', avatar: '🧪', sort_order: 999 })
+    .insert({ family_id: familyId, name, color: '#123456', avatar: '🧪', sort_order: 999 })
     .select('id')
     .single();
   if (error) throw error;
@@ -41,6 +40,7 @@ async function makeTask(fields: Record<string, unknown>): Promise<string> {
   const { data, error } = await db
     .from('tasks')
     .insert({
+      family_id: familyId,
       title: '__test__ chore',
       icon: '🧪',
       slot: 'morning',
@@ -56,7 +56,8 @@ async function makeTask(fields: Record<string, unknown>): Promise<string> {
 
 describeIf('toggle + scoring (integration)', () => {
   beforeAll(async () => {
-    db = createClient(url!, secret!, { auth: { persistSession: false } });
+    db = testDb();
+    familyId = await createTestFamily(db, 'toggle');
 
     childA = await makeChild('__test__ A');
     childB = await makeChild('__test__ B');
@@ -69,12 +70,12 @@ describeIf('toggle + scoring (integration)', () => {
 
   afterAll(async () => {
     if (!configured) return;
-    // Completions and tasks cascade from the children.
-    await db.from('children').delete().in('id', [childA, childB].filter(Boolean));
+    // Children, tasks, completions and perfect days all cascade from the family.
+    await deleteTestFamily(db, familyId);
   });
 
   it('1. toggling an unchecked chore creates exactly one completion row', async () => {
-    const result = await performToggle({ childId: childA, taskId: sharedTaskId, date: today, today });
+    const result = await performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today });
     expect(result.ok).toBe(true);
     expect(result.completed).toBe(true);
 
@@ -88,7 +89,7 @@ describeIf('toggle + scoring (integration)', () => {
   });
 
   it('2. toggling it again deletes that row', async () => {
-    const result = await performToggle({ childId: childA, taskId: sharedTaskId, date: today, today });
+    const result = await performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today });
     expect(result.ok).toBe(true);
     expect(result.completed).toBe(false);
 
@@ -104,8 +105,8 @@ describeIf('toggle + scoring (integration)', () => {
   it('3. toggling twice rapidly does not create two rows', async () => {
     // Both fire before either finishes - the unique constraint is what saves us.
     await Promise.all([
-      performToggle({ childId: childA, taskId: sharedTaskId, date: today, today }),
-      performToggle({ childId: childA, taskId: sharedTaskId, date: today, today }),
+      performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today }),
+      performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today }),
     ]);
 
     const { data } = await db
@@ -123,7 +124,7 @@ describeIf('toggle + scoring (integration)', () => {
   });
 
   it('6. changing a chore\'s point value does not alter an existing score', async () => {
-    await performToggle({ childId: childA, taskId: sharedTaskId, date: today, today });
+    await performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today });
     await db.from('tasks').update({ points: 50 }).eq('id', sharedTaskId);
 
     const { data } = await db
@@ -137,11 +138,12 @@ describeIf('toggle + scoring (integration)', () => {
     expect(data!.points_awarded).toBe(5); // snapshot, not the new 50
 
     await db.from('tasks').update({ points: 5 }).eq('id', sharedTaskId);
-    await performToggle({ childId: childA, taskId: sharedTaskId, date: today, today });
+    await performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today });
   });
 
   it('8. a write to yesterday fails without a parent override', async () => {
     const denied = await performToggle({
+      familyId,
       childId: childA,
       taskId: sharedTaskId,
       date: yesterday,
@@ -151,6 +153,7 @@ describeIf('toggle + scoring (integration)', () => {
     expect(denied.error).toMatch(/grown-up/i);
 
     const allowed = await performToggle({
+      familyId,
       childId: childA,
       taskId: sharedTaskId,
       date: yesterday,
@@ -161,6 +164,7 @@ describeIf('toggle + scoring (integration)', () => {
 
     // Undo it.
     await performToggle({
+      familyId,
       childId: childA,
       taskId: sharedTaskId,
       date: yesterday,
@@ -170,8 +174,8 @@ describeIf('toggle + scoring (integration)', () => {
   });
 
   it('10. the day total equals the sum of points_awarded', async () => {
-    await performToggle({ childId: childA, taskId: sharedTaskId, date: today, today });
-    const result = await performToggle({ childId: childA, taskId: sharedTask2Id, date: today, today });
+    await performToggle({ familyId, childId: childA, taskId: sharedTaskId, date: today, today });
+    const result = await performToggle({ familyId, childId: childA, taskId: sharedTask2Id, date: today, today });
 
     const { data } = await db
       .from('completions')
@@ -187,7 +191,7 @@ describeIf('toggle + scoring (integration)', () => {
   it('records a perfect day, and clears it when a chore is unchecked', async () => {
     // Child A sees the shared family list too, not just its own test chores, so a
     // perfect day means completing every visible chore.
-    const visible = await getVisibleTasks(childA, today);
+    const visible = await getVisibleTasks(familyId, childA, today);
     for (const task of visible) {
       const { data: already } = await db
         .from('completions')
@@ -197,11 +201,11 @@ describeIf('toggle + scoring (integration)', () => {
         .eq('completed_on', today)
         .maybeSingle();
       if (!already) {
-        await performToggle({ childId: childA, taskId: task.id, date: today, today });
+        await performToggle({ familyId, childId: childA, taskId: task.id, date: today, today });
       }
     }
 
-    const day = await getDayForChild(childA, today);
+    const day = await getDayForChild(familyId, childA, today);
     expect(day!.isPerfect).toBe(true);
 
     const { data: perfect } = await db
@@ -211,10 +215,10 @@ describeIf('toggle + scoring (integration)', () => {
       .eq('on_date', today);
     expect(perfect).toHaveLength(1);
 
-    expect(await getPerfectDayStreak(childA, today)).toBe(1);
+    expect(await getPerfectDayStreak(familyId, childA, today)).toBe(1);
 
     // Unchecking one must revoke it.
-    const undone = await performToggle({ childId: childA, taskId: sharedTask2Id, date: today, today });
+    const undone = await performToggle({ familyId, childId: childA, taskId: sharedTask2Id, date: today, today });
     expect(undone.isPerfect).toBe(false);
 
     const { data: gone } = await db
@@ -226,7 +230,7 @@ describeIf('toggle + scoring (integration)', () => {
   });
 
   it('refuses to toggle a chore that belongs to a different child', async () => {
-    const result = await performToggle({ childId: childB, taskId: sharedTaskId, date: today, today });
+    const result = await performToggle({ familyId, childId: childB, taskId: sharedTaskId, date: today, today });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/not on the list/i);
   });
@@ -235,13 +239,13 @@ describeIf('toggle + scoring (integration)', () => {
     it('a one-off extra chore shows only on its date, and only for its child', async () => {
       const oneOff = await makeTask({ child_id: childA, on_date: today, created_on: today });
 
-      const aToday = await getVisibleTasks(childA, today);
+      const aToday = await getVisibleTasks(familyId, childA, today);
       expect(aToday.map((t) => t.id)).toContain(oneOff);
 
-      const aTomorrow = await getVisibleTasks(childA, addDays(today, 1));
+      const aTomorrow = await getVisibleTasks(familyId, childA, addDays(today, 1));
       expect(aTomorrow.map((t) => t.id)).not.toContain(oneOff);
 
-      const bToday = await getVisibleTasks(childB, today);
+      const bToday = await getVisibleTasks(familyId, childB, today);
       expect(bToday.map((t) => t.id)).not.toContain(oneOff);
 
       await db.from('tasks').delete().eq('id', oneOff);
@@ -250,10 +254,10 @@ describeIf('toggle + scoring (integration)', () => {
     it('a recurring extra chore persists, and stays with its child', async () => {
       const recurring = await makeTask({ child_id: childA, on_date: null, created_on: today });
 
-      const aTomorrow = await getVisibleTasks(childA, addDays(today, 1));
+      const aTomorrow = await getVisibleTasks(familyId, childA, addDays(today, 1));
       expect(aTomorrow.map((t) => t.id)).toContain(recurring);
 
-      const bTomorrow = await getVisibleTasks(childB, addDays(today, 1));
+      const bTomorrow = await getVisibleTasks(familyId, childB, addDays(today, 1));
       expect(bTomorrow.map((t) => t.id)).not.toContain(recurring);
 
       await db.from('tasks').delete().eq('id', recurring);
@@ -262,7 +266,7 @@ describeIf('toggle + scoring (integration)', () => {
     it('a chore added today does not appear on a past day', async () => {
       const addedToday = await makeTask({ child_id: childA, created_on: today });
 
-      const past = await getVisibleTasks(childA, yesterday);
+      const past = await getVisibleTasks(familyId, childA, yesterday);
       expect(past.map((t) => t.id)).not.toContain(addedToday);
 
       await db.from('tasks').delete().eq('id', addedToday);
@@ -272,7 +276,7 @@ describeIf('toggle + scoring (integration)', () => {
       const removed = await makeTask({ child_id: childA, created_on: '2020-01-01' });
       await db.from('tasks').update({ is_active: false }).eq('id', removed);
 
-      const visible = await getVisibleTasks(childA, today);
+      const visible = await getVisibleTasks(familyId, childA, today);
       expect(visible.map((t) => t.id)).not.toContain(removed);
 
       await db.from('tasks').delete().eq('id', removed);

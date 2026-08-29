@@ -5,48 +5,85 @@
  * the layer underneath them plus the rules that the actions enforce: soft delete
  * preserves history, the PIN is hashed and verifiable, and extra chores land on
  * exactly one child's list.
+ *
+ * Everything runs inside a throwaway family, so the shared chore list these
+ * assertions depend on is the one this file created - not whatever happens to be
+ * seeded in the project.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import bcrypt from 'bcryptjs';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { getExtraChores, getMonthTotals, getSharedTasks, getVisibleTasks } from '../lib/queries';
+import { type SupabaseClient } from '@supabase/supabase-js';
+import {
+  getExtraChores,
+  getMonthTotals,
+  getSharedTasks,
+  getVisibleTasks,
+  hasParentPin,
+} from '../lib/queries';
 import { performToggle } from '../lib/toggle';
 import { addDays, todayInKarachi } from '../lib/dates';
+import { configured, createTestFamily, deleteTestFamily, testDb } from './helpers/family';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const describeIf = url && secret ? describe : describe.skip;
+const describeIf = configured ? describe : describe.skip;
 
 let db: SupabaseClient;
 const today = todayInKarachi();
 
+let familyId = '';
 let childId = '';
 let otherChildId = '';
 
 describeIf('parent zone (integration)', () => {
   beforeAll(async () => {
-    db = createClient(url!, secret!, { auth: { persistSession: false } });
+    db = testDb();
+    familyId = await createTestFamily(db, 'parent-zone');
 
     const { data } = await db
       .from('children')
       .insert([
-        { name: '__test__ P1', color: '#123456', avatar: '🧪', sort_order: 998 },
-        { name: '__test__ P2', color: '#654321', avatar: '🧪', sort_order: 999 },
+        { family_id: familyId, name: '__test__ P1', color: '#123456', avatar: '🧪', sort_order: 998 },
+        { family_id: familyId, name: '__test__ P2', color: '#654321', avatar: '🧪', sort_order: 999 },
       ])
       .select('id');
 
     childId = data![0].id as string;
     otherChildId = data![1].id as string;
+
+    // One shared chore, so "the shared list" is a known quantity here.
+    await db.from('tasks').insert({
+      family_id: familyId,
+      title: '__test__ shared chore',
+      icon: '🧪',
+      slot: 'morning',
+      points: 5,
+      sort_order: 1,
+      child_id: null,
+      on_date: null,
+      created_on: '2020-01-01',
+    });
   });
 
   afterAll(async () => {
-    await db.from('children').delete().in('id', [childId, otherChildId].filter(Boolean));
+    await deleteTestFamily(db, familyId);
   });
 
-  it('the PIN is stored hashed, never in plain text', async () => {
+  it('a new family starts with no PIN, and the one it sets is stored hashed', async () => {
+    // A family created by a Google sign-in has never run the seed script, which
+    // is why the parent zone has to offer to create a PIN rather than assume one.
+    expect(await hasParentPin(familyId)).toBe(false);
+
+    await db.from('settings').insert({
+      family_id: familyId,
+      key: 'parent_pin_hash',
+      value: bcrypt.hashSync('1234', 10),
+    });
+
+    expect(await hasParentPin(familyId)).toBe(true);
+
     const { data } = await db
       .from('settings')
       .select('value')
+      .eq('family_id', familyId)
       .eq('key', 'parent_pin_hash')
       .single();
 
@@ -61,6 +98,7 @@ describeIf('parent zone (integration)', () => {
     const { data: extra } = await db
       .from('tasks')
       .insert({
+        family_id: familyId,
         title: '__test__ water the plants',
         icon: '🪴',
         slot: 'evening',
@@ -73,14 +111,14 @@ describeIf('parent zone (integration)', () => {
       .select('id')
       .single();
 
-    const mine = await getVisibleTasks(childId, today);
+    const mine = await getVisibleTasks(familyId, childId, today);
     expect(mine.map((t) => t.id)).toContain(extra!.id);
 
-    const theirs = await getVisibleTasks(otherChildId, today);
+    const theirs = await getVisibleTasks(familyId, otherChildId, today);
     expect(theirs.map((t) => t.id)).not.toContain(extra!.id);
 
     // The shared list - what every child gets by default - must be unchanged.
-    const shared = await getSharedTasks();
+    const shared = await getSharedTasks(familyId);
     expect(shared.map((t) => t.id)).not.toContain(extra!.id);
     expect(shared.every((t) => t.child_id === null)).toBe(true);
 
@@ -88,8 +126,8 @@ describeIf('parent zone (integration)', () => {
   });
 
   it('a child with no extras sees exactly the shared list', async () => {
-    const shared = await getSharedTasks();
-    const visible = await getVisibleTasks(otherChildId, today);
+    const shared = await getSharedTasks(familyId);
+    const visible = await getVisibleTasks(familyId, otherChildId, today);
     expect(visible.map((t) => t.id).sort()).toEqual(shared.map((t) => t.id).sort());
   });
 
@@ -98,6 +136,7 @@ describeIf('parent zone (integration)', () => {
       .from('tasks')
       .insert([
         {
+          family_id: familyId,
           title: '__test__ yesterday one-off',
           icon: '🧪',
           slot: 'morning',
@@ -108,6 +147,7 @@ describeIf('parent zone (integration)', () => {
           created_on: addDays(today, -1),
         },
         {
+          family_id: familyId,
           title: '__test__ today one-off',
           icon: '🧪',
           slot: 'morning',
@@ -120,7 +160,7 @@ describeIf('parent zone (integration)', () => {
       ])
       .select('id,title');
 
-    const extras = await getExtraChores(childId, today);
+    const extras = await getExtraChores(familyId, childId, today);
     const titles = extras.map((t) => t.title);
     expect(titles).toContain('__test__ today one-off');
     expect(titles).not.toContain('__test__ yesterday one-off');
@@ -132,6 +172,7 @@ describeIf('parent zone (integration)', () => {
     const { data: task } = await db
       .from('tasks')
       .insert({
+        family_id: familyId,
         title: '__test__ soft delete me',
         icon: '🧪',
         slot: 'morning',
@@ -143,12 +184,12 @@ describeIf('parent zone (integration)', () => {
       .select('id')
       .single();
 
-    await performToggle({ childId, taskId: task!.id, date: today, today });
+    await performToggle({ familyId, childId, taskId: task!.id, date: today, today });
 
     // Soft delete, exactly as removeExtraChore does.
     await db.from('tasks').update({ is_active: false }).eq('id', task!.id);
 
-    const visible = await getVisibleTasks(childId, today);
+    const visible = await getVisibleTasks(familyId, childId, today);
     expect(visible.map((t) => t.id)).not.toContain(task!.id);
 
     // The completion - and its 7 points - survives.
@@ -167,19 +208,23 @@ describeIf('parent zone (integration)', () => {
   });
 
   it('7. soft-deleting a child hides them but preserves their month total', async () => {
-    const shared = await getSharedTasks();
-    await performToggle({ childId, taskId: shared[0].id, date: today, today });
+    const shared = await getSharedTasks(familyId);
+    await performToggle({ familyId, childId, taskId: shared[0].id, date: today, today });
 
     const [year, month] = today.split('-').map(Number);
-    const before = (await getMonthTotals(year, month))[childId];
+    const before = (await getMonthTotals(familyId, year, month))[childId];
     expect(before.points).toBeGreaterThan(0);
 
     await db.from('children').update({ is_active: false }).eq('id', childId);
 
-    const { data: active } = await db.from('children').select('id').eq('is_active', true);
+    const { data: active } = await db
+      .from('children')
+      .select('id')
+      .eq('family_id', familyId)
+      .eq('is_active', true);
     expect(active!.map((c) => c.id)).not.toContain(childId);
 
-    const after = (await getMonthTotals(year, month))[childId];
+    const after = (await getMonthTotals(familyId, year, month))[childId];
     expect(after.points).toBe(before.points);
 
     await db.from('children').update({ is_active: true }).eq('id', childId);

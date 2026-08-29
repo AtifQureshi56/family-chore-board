@@ -1,6 +1,6 @@
 import 'server-only';
 import { createServiceClient } from './supabase';
-import { getVisibleTasks } from './queries';
+import { getChild, getVisibleTasks } from './queries';
 import { isPerfectDay } from './scoring';
 import type { DayTask } from './types';
 
@@ -23,8 +23,12 @@ export type ToggleResult = {
  * This deliberately knows nothing about cookies or requests so it can be tested
  * directly against the database. The caller decides whether a past-day write is
  * allowed; see app/actions/toggleTask.ts, where that decision is the PIN cookie.
+ *
+ * familyId comes from the signed-in session, never from the request body. Both it
+ * and childId are checked below, because the browser can send any id it likes.
  */
 export async function performToggle(input: {
+  familyId: string;
   childId: string;
   taskId: string;
   /** The date being written to. */
@@ -34,7 +38,7 @@ export async function performToggle(input: {
   /** Only ever true when the parent zone is genuinely unlocked. */
   allowPastWrite?: boolean;
 }): Promise<ToggleResult> {
-  const { childId, taskId, date, today } = input;
+  const { familyId, childId, taskId, date, today } = input;
 
   // Days lock at local midnight.
   if (date !== today && !input.allowPastWrite) {
@@ -43,9 +47,15 @@ export async function performToggle(input: {
 
   const db = createServiceClient();
 
+  // Someone else's child, or one that no longer exists. Checked before anything
+  // is written: without it a crafted request would attach a completion row from
+  // this family to a child in another one.
+  const child = await getChild(familyId, childId);
+  if (!child) return { ok: false, error: 'That child is not on this board.' };
+
   // A child may only toggle a chore that is actually theirs on that date. Without
   // this, a crafted request could complete another child's extra chore.
-  const visible = await getVisibleTasks(childId, date);
+  const visible = await getVisibleTasks(familyId, childId, date);
   const task = visible.find((t) => t.id === taskId);
   if (!task) return { ok: false, error: 'That chore is not on the list today.' };
 
@@ -53,6 +63,7 @@ export async function performToggle(input: {
     db
       .from('completions')
       .select('id')
+      .eq('family_id', familyId)
       .eq('child_id', childId)
       .eq('task_id', taskId)
       .eq('completed_on', date)
@@ -60,6 +71,7 @@ export async function performToggle(input: {
     db
       .from('perfect_days')
       .select('on_date')
+      .eq('family_id', familyId)
       .eq('child_id', childId)
       .eq('on_date', date)
       .maybeSingle(),
@@ -77,6 +89,7 @@ export async function performToggle(input: {
     // the unique constraint already makes double-scoring structurally impossible.
     const { error } = await db.from('completions').upsert(
       {
+        family_id: familyId,
         child_id: childId,
         task_id: taskId,
         completed_on: date,
@@ -90,6 +103,7 @@ export async function performToggle(input: {
   const { data: rows } = await db
     .from('completions')
     .select('task_id,points_awarded')
+    .eq('family_id', familyId)
     .eq('child_id', childId)
     .eq('completed_on', date);
 
@@ -107,9 +121,17 @@ export async function performToggle(input: {
   if (perfect) {
     await db
       .from('perfect_days')
-      .upsert({ child_id: childId, on_date: date }, { onConflict: 'child_id,on_date' });
+      .upsert(
+        { family_id: familyId, child_id: childId, on_date: date },
+        { onConflict: 'child_id,on_date' },
+      );
   } else {
-    await db.from('perfect_days').delete().eq('child_id', childId).eq('on_date', date);
+    await db
+      .from('perfect_days')
+      .delete()
+      .eq('family_id', familyId)
+      .eq('child_id', childId)
+      .eq('on_date', date);
   }
 
   return {

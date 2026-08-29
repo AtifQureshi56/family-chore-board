@@ -5,7 +5,7 @@
  * queries report, including the month-boundary cases.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { type SupabaseClient } from '@supabase/supabase-js';
 import {
   getMonthTotals,
   getPerfectDaysByChild,
@@ -13,12 +13,12 @@ import {
   getPerfectDayStreak,
 } from '../lib/queries';
 import { addDays, monthRange, todayInKarachi } from '../lib/dates';
+import { configured, createTestFamily, deleteTestFamily, testDb } from './helpers/family';
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const secret = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const describeIf = url && secret ? describe : describe.skip;
+const describeIf = configured ? describe : describe.skip;
 
 let db: SupabaseClient;
+let familyId = '';
 let childId = '';
 let taskId = '';
 
@@ -28,11 +28,18 @@ const { start, end } = monthRange(year, month);
 
 describeIf('scoreboard (integration)', () => {
   beforeAll(async () => {
-    db = createClient(url!, secret!, { auth: { persistSession: false } });
+    db = testDb();
+    familyId = await createTestFamily(db, 'scoreboard');
 
     const { data: child } = await db
       .from('children')
-      .insert({ name: '__test__ S1', color: '#123456', avatar: '🧪', sort_order: 997 })
+      .insert({
+        family_id: familyId,
+        name: '__test__ S1',
+        color: '#123456',
+        avatar: '🧪',
+        sort_order: 997,
+      })
       .select('id')
       .single();
     childId = child!.id as string;
@@ -40,6 +47,7 @@ describeIf('scoreboard (integration)', () => {
     const { data: task } = await db
       .from('tasks')
       .insert({
+        family_id: familyId,
         title: '__test__ scoreboard chore',
         icon: '🧪',
         slot: 'morning',
@@ -54,7 +62,7 @@ describeIf('scoreboard (integration)', () => {
   });
 
   afterAll(async () => {
-    await db.from('children').delete().eq('id', childId);
+    await deleteTestFamily(db, familyId);
   });
 
   it('the month total equals a hand count of points_awarded', async () => {
@@ -67,6 +75,7 @@ describeIf('scoreboard (integration)', () => {
 
     await db.from('completions').insert(
       inMonth.map((row) => ({
+        family_id: familyId,
         child_id: childId,
         task_id: taskId,
         completed_on: row.on,
@@ -77,7 +86,7 @@ describeIf('scoreboard (integration)', () => {
     const handCount = inMonth.reduce((sum, r) => sum + r.points, 0);
     expect(handCount).toBe(18);
 
-    const totals = await getMonthTotals(year, month);
+    const totals = await getMonthTotals(familyId, year, month);
     expect(totals[childId].points).toBe(handCount);
 
     // And it agrees with a raw query over the same window.
@@ -96,11 +105,11 @@ describeIf('scoreboard (integration)', () => {
     const dayAfter = addDays(end, 1);
 
     await db.from('completions').insert([
-      { child_id: childId, task_id: taskId, completed_on: dayBefore, points_awarded: 99 },
-      { child_id: childId, task_id: taskId, completed_on: dayAfter, points_awarded: 99 },
+      { family_id: familyId, child_id: childId, task_id: taskId, completed_on: dayBefore, points_awarded: 99 },
+      { family_id: familyId, child_id: childId, task_id: taskId, completed_on: dayAfter, points_awarded: 99 },
     ]);
 
-    const totals = await getMonthTotals(year, month);
+    const totals = await getMonthTotals(familyId, year, month);
     // Still 18 - the 99s belong to the neighbouring months.
     expect(totals[childId].points).toBe(18);
 
@@ -113,14 +122,14 @@ describeIf('scoreboard (integration)', () => {
 
   it('counts perfect days and reports them per child', async () => {
     await db.from('perfect_days').insert([
-      { child_id: childId, on_date: start },
-      { child_id: childId, on_date: addDays(start, 1) },
+      { family_id: familyId, child_id: childId, on_date: start },
+      { family_id: familyId, child_id: childId, on_date: addDays(start, 1) },
     ]);
 
-    const totals = await getMonthTotals(year, month);
+    const totals = await getMonthTotals(familyId, year, month);
     expect(totals[childId].perfectDays).toBe(2);
 
-    const byChild = await getPerfectDaysByChild(start, end);
+    const byChild = await getPerfectDaysByChild(familyId, start, end);
     expect(byChild[childId].sort()).toEqual([start, addDays(start, 1)].sort());
   });
 
@@ -128,15 +137,15 @@ describeIf('scoreboard (integration)', () => {
     // A clean three-day run ending today.
     await db.from('perfect_days').delete().eq('child_id', childId);
     await db.from('perfect_days').insert([
-      { child_id: childId, on_date: today },
-      { child_id: childId, on_date: addDays(today, -1) },
-      { child_id: childId, on_date: addDays(today, -2) },
+      { family_id: familyId, child_id: childId, on_date: today },
+      { family_id: familyId, child_id: childId, on_date: addDays(today, -1) },
+      { family_id: familyId, child_id: childId, on_date: addDays(today, -2) },
       // A gap, then an older run that must not be counted.
-      { child_id: childId, on_date: addDays(today, -5) },
+      { family_id: familyId, child_id: childId, on_date: addDays(today, -5) },
     ]);
 
-    const batched = await getStreaksByChild(today);
-    const single = await getPerfectDayStreak(childId, today);
+    const batched = await getStreaksByChild(familyId, today);
+    const single = await getPerfectDayStreak(familyId, childId, today);
 
     expect(single).toBe(3);
     expect(batched[childId]).toBe(3);
@@ -145,18 +154,18 @@ describeIf('scoreboard (integration)', () => {
   it('a streak ending yesterday still counts', async () => {
     await db.from('perfect_days').delete().eq('child_id', childId);
     await db.from('perfect_days').insert([
-      { child_id: childId, on_date: addDays(today, -1) },
-      { child_id: childId, on_date: addDays(today, -2) },
+      { family_id: familyId, child_id: childId, on_date: addDays(today, -1) },
+      { family_id: familyId, child_id: childId, on_date: addDays(today, -2) },
     ]);
 
     // Not broken just because today is not finished yet.
-    expect(await getPerfectDayStreak(childId, today)).toBe(2);
+    expect(await getPerfectDayStreak(familyId, childId, today)).toBe(2);
   });
 
   it('a streak broken two days ago reads as zero', async () => {
     await db.from('perfect_days').delete().eq('child_id', childId);
-    await db.from('perfect_days').insert([{ child_id: childId, on_date: addDays(today, -2) }]);
+    await db.from('perfect_days').insert([{ family_id: familyId, child_id: childId, on_date: addDays(today, -2) }]);
 
-    expect(await getPerfectDayStreak(childId, today)).toBe(0);
+    expect(await getPerfectDayStreak(familyId, childId, today)).toBe(0);
   });
 });

@@ -1,19 +1,20 @@
 import { NextResponse } from 'next/server';
 import { getLatestCompletion, getTvBoardData } from '@/lib/queries';
+import { getFamilySession } from '@/lib/session';
 import { currentSlot, todayInKarachi } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
 
 export type TvSnapshot = Awaited<ReturnType<typeof buildSnapshot>>;
 
-async function buildSnapshot() {
+async function buildSnapshot(familyId: string) {
   // Resolved fresh on every poll, not captured once: a board left running
   // overnight must roll over to the new Karachi day by itself.
   const date = todayInKarachi();
 
   const [children, latest] = await Promise.all([
-    getTvBoardData(date),
-    getLatestCompletion(date),
+    getTvBoardData(familyId, date),
+    getLatestCompletion(familyId, date),
   ]);
 
   return { date, slot: currentSlot(), children, latest };
@@ -28,7 +29,18 @@ async function buildSnapshot() {
  */
 export async function GET() {
   try {
-    return NextResponse.json(await buildSnapshot(), {
+    const session = await getFamilySession();
+    // 401, not 500: a board whose session finally lapsed after weeks on the wall
+    // needs the parent to sign in again, and that is worth saying plainly rather
+    // than hiding behind "could not load".
+    if (!session) {
+      return NextResponse.json(
+        { error: 'Signed out. Sign in again on this device.' },
+        { status: 401, headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
+
+    return NextResponse.json(await buildSnapshot(session.familyId), {
       headers: { 'Cache-Control': 'no-store, max-age=0' },
     });
   } catch (err) {

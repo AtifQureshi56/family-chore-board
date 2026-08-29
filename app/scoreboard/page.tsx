@@ -8,6 +8,7 @@ import {
   getPerfectDaysByChild,
   getStreaksByChild,
 } from '@/lib/queries';
+import { requireFamily } from '@/lib/session';
 import { currentMonthInKarachi, formatMonth, monthRange, todayInKarachi } from '@/lib/dates';
 import { earnedBadges, nextGoal } from '@/lib/badges';
 
@@ -18,6 +19,7 @@ export default async function ScoreboardPage({
 }: {
   searchParams: Promise<{ y?: string; m?: string }>;
 }) {
+  const { familyId } = await requireFamily();
   const params = await searchParams;
   const today = todayInKarachi();
   const currentMonth = currentMonthInKarachi();
@@ -29,10 +31,10 @@ export default async function ScoreboardPage({
   const { start, end } = monthRange(year, month);
 
   const [children, totals, perfectByChild, streaks] = await Promise.all([
-    getActiveChildren(),
-    getMonthTotals(year, month),
-    getPerfectDaysByChild(start, end),
-    getStreaksByChild(today),
+    getActiveChildren(familyId),
+    getMonthTotals(familyId, year, month),
+    getPerfectDaysByChild(familyId, start, end),
+    getStreaksByChild(familyId, today),
   ]);
 
   const rows = children

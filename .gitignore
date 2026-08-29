@@ -44,3 +44,9 @@ next-env.d.ts
 
 # local env
 .env.local
+
+# Local scratch that must never reach GitHub: the Google OAuth client secret
+# lives in a Word file next to the code, and screenshots often contain keys.
+*.docx
+~$*
+Screenshot*.png

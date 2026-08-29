@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { createServiceClient } from '@/lib/supabase';
 import { todayInKarachi } from '@/lib/dates';
-import { requireParent } from '@/lib/parentSession';
+import { requireParentZone } from '@/lib/parentSession';
 import { SLOTS, type Slot } from '@/lib/types';
 
 export type TaskInput = {
@@ -19,7 +19,7 @@ export type TaskInput = {
  * for a single child go through manageExtraChores instead.
  */
 export async function saveTask(input: TaskInput): Promise<{ ok: boolean; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   const title = input.title.trim();
   if (!title) return { ok: false, error: 'Give the chore a name.' };
@@ -41,12 +41,14 @@ export async function saveTask(input: TaskInput): Promise<{ ok: boolean; error?:
       .from('tasks')
       .update(fields)
       .eq('id', input.id)
+      .eq('family_id', familyId)
       .is('child_id', null);
     if (error) return { ok: false, error: error.message };
   } else {
     const { data: last } = await db
       .from('tasks')
       .select('sort_order')
+      .eq('family_id', familyId)
       .eq('slot', input.slot)
       .order('sort_order', { ascending: false })
       .limit(1)
@@ -54,6 +56,7 @@ export async function saveTask(input: TaskInput): Promise<{ ok: boolean; error?:
 
     const { error } = await db.from('tasks').insert({
       ...fields,
+      family_id: familyId,
       sort_order: (last?.sort_order ?? 0) + 1,
       child_id: null,
       on_date: null,
@@ -69,13 +72,14 @@ export async function saveTask(input: TaskInput): Promise<{ ok: boolean; error?:
 
 /** Soft delete - completions point at this row and must keep their history. */
 export async function removeTask(taskId: string): Promise<{ ok: boolean; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   const db = createServiceClient();
   const { error } = await db
     .from('tasks')
     .update({ is_active: false })
     .eq('id', taskId)
+    .eq('family_id', familyId)
     .is('child_id', null);
 
   if (error) return { ok: false, error: error.message };
@@ -90,19 +94,21 @@ export async function moveTask(
   taskId: string,
   direction: 'up' | 'down',
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   const db = createServiceClient();
   const { data: task } = await db
     .from('tasks')
     .select('id,slot,sort_order')
     .eq('id', taskId)
+    .eq('family_id', familyId)
     .maybeSingle();
   if (!task) return { ok: false, error: 'That chore no longer exists.' };
 
   const { data: siblings } = await db
     .from('tasks')
     .select('id,sort_order')
+    .eq('family_id', familyId)
     .eq('slot', task.slot)
     .is('child_id', null)
     .eq('is_active', true)
@@ -113,8 +119,16 @@ export async function moveTask(
   const swapWith = direction === 'up' ? index - 1 : index + 1;
   if (index === -1 || swapWith < 0 || swapWith >= list.length) return { ok: true };
 
-  await db.from('tasks').update({ sort_order: list[swapWith].sort_order }).eq('id', list[index].id);
-  await db.from('tasks').update({ sort_order: list[index].sort_order }).eq('id', list[swapWith].id);
+  await db
+    .from('tasks')
+    .update({ sort_order: list[swapWith].sort_order })
+    .eq('id', list[index].id)
+    .eq('family_id', familyId);
+  await db
+    .from('tasks')
+    .update({ sort_order: list[index].sort_order })
+    .eq('id', list[swapWith].id)
+    .eq('family_id', familyId);
 
   revalidatePath('/parent');
   revalidatePath('/');

@@ -1,6 +1,6 @@
 'use server';
 
-import { requireParent } from '@/lib/parentSession';
+import { requireParentZone } from '@/lib/parentSession';
 import { getDayForChild } from '@/lib/queries';
 import type { ChildDay } from '@/lib/types';
 
@@ -12,13 +12,13 @@ export async function loadDayForCorrection(
   childId: string,
   date: string,
 ): Promise<{ ok: boolean; day?: ChildDay; error?: string }> {
-  await requireParent();
+  const { familyId } = await requireParentZone();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return { ok: false, error: 'Pick a valid date.' };
   }
 
-  const day = await getDayForChild(childId, date);
+  const day = await getDayForChild(familyId, childId, date);
   if (!day) return { ok: false, error: 'That child is not on the board.' };
 
   return { ok: true, day };

@@ -5,30 +5,38 @@ import ExtraChoreForm from '@/components/ExtraChoreForm';
 import ExtraChoreList from '@/components/ExtraChoreList';
 import ParentTabs from '@/components/ParentTabs';
 import PinGate from '@/components/PinGate';
+import SignOutButton from '@/components/SignOutButton';
 import TaskForm from '@/components/TaskForm';
 import LockButton from '@/components/LockButton';
 import { isParentUnlocked } from '@/lib/parentSession';
-import { getAllChildren, getExtraChores, getSharedTasks } from '@/lib/queries';
+import { requireFamily } from '@/lib/session';
+import { getAllChildren, getExtraChores, getSharedTasks, hasParentPin } from '@/lib/queries';
 import { todayInKarachi } from '@/lib/dates';
 import type { Task } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ParentPage() {
-  // The gate is the cookie, checked on the server. Hiding the UI is not security -
-  // every action underneath re-checks this independently.
-  if (!(await isParentUnlocked())) {
-    return <PinGate />;
+  // Two gates, in order. Signing in decides *whose* board this is; the PIN
+  // decides whether the person holding the tablet may edit it. Hiding the UI is
+  // not security - every action underneath re-checks both independently.
+  const { familyId, email } = await requireFamily();
+
+  if (!(await isParentUnlocked(familyId))) {
+    return <PinGate mode={(await hasParentPin(familyId)) ? 'enter' : 'create'} />;
   }
 
   const today = todayInKarachi();
-  const [allChildren, sharedTasks] = await Promise.all([getAllChildren(), getSharedTasks()]);
+  const [allChildren, sharedTasks] = await Promise.all([
+    getAllChildren(familyId),
+    getSharedTasks(familyId),
+  ]);
   const activeChildren = allChildren.filter((c) => c.is_active);
 
   const extrasByChild: Record<string, Task[]> = {};
   await Promise.all(
     activeChildren.map(async (child) => {
-      extrasByChild[child.id] = await getExtraChores(child.id, today);
+      extrasByChild[child.id] = await getExtraChores(familyId, child.id, today);
     }),
   );
 
@@ -84,6 +92,32 @@ export default async function ParentPage() {
             label: 'Fix a day',
             icon: '🗓️',
             content: <DayCorrector kids={activeChildren} today={today} />,
+          },
+          {
+            id: 'account',
+            label: 'Account',
+            icon: '👤',
+            content: (
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-2 rounded-3xl bg-surface p-5 shadow-sm ring-1 ring-black/5">
+                  <h2 className="text-xl font-black">This family&apos;s account</h2>
+                  <p className="font-semibold text-muted">{email ?? 'Signed in with Google'}</p>
+                  <p className="text-sm font-semibold text-muted">
+                    Your children, their chores and their stars belong to this account. No other
+                    family can see them, and you cannot see theirs.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-3">
+                  <h2 className="text-xl font-black">Sign out</h2>
+                  <p className="font-semibold text-muted">
+                    Only do this if the tablet is leaving the house. Signing back in brings the
+                    whole board back exactly as it was.
+                  </p>
+                  <SignOutButton />
+                </div>
+              </div>
+            ),
           },
         ]}
       />

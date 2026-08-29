@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import BadgeShelf from '@/components/BadgeShelf';
 import DayBoard from '@/components/DayBoard';
 import { getDayForChild, getMonthTotals, getPerfectDayStreak } from '@/lib/queries';
+import { requireFamily } from '@/lib/session';
 import { currentMonthInKarachi, formatLongDate, todayInKarachi } from '@/lib/dates';
 import { earnedBadges, nextGoal } from '@/lib/badges';
 
@@ -14,13 +15,16 @@ export default async function ChildDayPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // A child id belonging to another family falls through to notFound() below:
+  // every query here is scoped to this family, so getDayForChild returns null.
+  const { familyId } = await requireFamily();
   const today = todayInKarachi();
   const { year, month } = currentMonthInKarachi();
 
   const [day, streak, monthTotals] = await Promise.all([
-    getDayForChild(id, today),
-    getPerfectDayStreak(id, today),
-    getMonthTotals(year, month),
+    getDayForChild(familyId, id, today),
+    getPerfectDayStreak(familyId, id, today),
+    getMonthTotals(familyId, year, month),
   ]);
 
   if (!day) notFound();

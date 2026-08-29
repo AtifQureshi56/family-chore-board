@@ -23,6 +23,16 @@ const TASK_COLUMNS =
   'id,title,icon,slot,points,sort_order,is_active,child_id,on_date,created_on';
 
 /**
+ * Every function in this file takes familyId first and filters on it. That is not
+ * a style choice: these run under the service-role key, which bypasses row-level
+ * security completely, so the `.eq('family_id', ...)` on each query IS the wall
+ * between one family's children and everyone else's. A query added here without
+ * it leaks the whole table.
+ *
+ * familyId always comes from lib/session.ts, never from a client argument.
+ */
+
+/**
  * THE visibility rule. Every "which chores does this child have on this date"
  * calculation must go through here - the day view, the picker badges, the
  * progress ring, the perfect-day check and the TV board. Duplicating this
@@ -34,11 +44,16 @@ const TASK_COLUMNS =
  *   on_date  match     -> one-off for this date
  *   created_on <= date -> a chore added today cannot un-perfect a past day
  */
-export async function getVisibleTasks(childId: string, date: string): Promise<Task[]> {
+export async function getVisibleTasks(
+  familyId: string,
+  childId: string,
+  date: string,
+): Promise<Task[]> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('tasks')
     .select(TASK_COLUMNS)
+    .eq('family_id', familyId)
     .eq('is_active', true)
     .or(`child_id.is.null,child_id.eq.${childId}`)
     .or(`on_date.is.null,on_date.eq.${date}`)
@@ -49,11 +64,12 @@ export async function getVisibleTasks(childId: string, date: string): Promise<Ta
   return (data ?? []) as Task[];
 }
 
-export async function getActiveChildren(): Promise<Child[]> {
+export async function getActiveChildren(familyId: string): Promise<Child[]> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('children')
     .select('*')
+    .eq('family_id', familyId)
     .eq('is_active', true)
     .order('sort_order', { ascending: true });
 
@@ -62,11 +78,12 @@ export async function getActiveChildren(): Promise<Child[]> {
 }
 
 /** Every child including the removed ones - the parent zone needs to see both. */
-export async function getAllChildren(): Promise<Child[]> {
+export async function getAllChildren(familyId: string): Promise<Child[]> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('children')
     .select('*')
+    .eq('family_id', familyId)
     .order('is_active', { ascending: false })
     .order('sort_order', { ascending: true });
 
@@ -75,11 +92,12 @@ export async function getAllChildren(): Promise<Child[]> {
 }
 
 /** The shared default list every child sees: child_id is null. */
-export async function getSharedTasks(): Promise<Task[]> {
+export async function getSharedTasks(familyId: string): Promise<Task[]> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('tasks')
     .select(TASK_COLUMNS)
+    .eq('family_id', familyId)
     .is('child_id', null)
     .eq('is_active', true)
     .order('slot', { ascending: true })
@@ -93,11 +111,16 @@ export async function getSharedTasks(): Promise<Task[]> {
  * The extra chores added for one specific child. One-off chores whose date has
  * already passed are hidden - they are history, not something to manage.
  */
-export async function getExtraChores(childId: string, today: string): Promise<Task[]> {
+export async function getExtraChores(
+  familyId: string,
+  childId: string,
+  today: string,
+): Promise<Task[]> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('tasks')
     .select(TASK_COLUMNS)
+    .eq('family_id', familyId)
     .eq('child_id', childId)
     .eq('is_active', true)
     .or(`on_date.is.null,on_date.gte.${today}`)
@@ -108,11 +131,16 @@ export async function getExtraChores(childId: string, today: string): Promise<Ta
   return (data ?? []) as Task[];
 }
 
-export async function getChild(childId: string): Promise<Child | null> {
+/**
+ * One child, but only if they belong to this family. Returning null for a child
+ * in someone else's family is what turns a guessed id in the URL into a 404.
+ */
+export async function getChild(familyId: string, childId: string): Promise<Child | null> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('children')
     .select('*')
+    .eq('family_id', familyId)
     .eq('id', childId)
     .maybeSingle();
 
@@ -121,20 +149,29 @@ export async function getChild(childId: string): Promise<Child | null> {
 }
 
 /** Active tasks joined with that child's completions for the date. */
-export async function getDayForChild(childId: string, date: string): Promise<ChildDay | null> {
+export async function getDayForChild(
+  familyId: string,
+  childId: string,
+  date: string,
+): Promise<ChildDay | null> {
   const db = createServiceClient();
 
-  const [child, tasks, completionsResult] = await Promise.all([
-    getChild(childId),
-    getVisibleTasks(childId, date),
+  // The child lookup comes first and on its own: everything below reads rows
+  // keyed by childId, so an id belonging to another family has to fail before
+  // any of it runs.
+  const child = await getChild(familyId, childId);
+  if (!child) return null;
+
+  const [tasks, completionsResult] = await Promise.all([
+    getVisibleTasks(familyId, childId, date),
     db
       .from('completions')
       .select('task_id,points_awarded')
+      .eq('family_id', familyId)
       .eq('child_id', childId)
       .eq('completed_on', date),
   ]);
 
-  if (!child) return null;
   if (completionsResult.error) throw completionsResult.error;
 
   const done = new Set((completionsResult.data ?? []).map((c) => c.task_id as string));
@@ -158,13 +195,20 @@ export async function getDayForChild(childId: string, date: string): Promise<Chi
 }
 
 /** Points per child for one date - powers the picker badges. */
-export async function getDayTotals(date: string): Promise<Record<string, DayTotal>> {
+export async function getDayTotals(
+  familyId: string,
+  date: string,
+): Promise<Record<string, DayTotal>> {
   const db = createServiceClient();
-  const children = await getActiveChildren();
+  const children = await getActiveChildren(familyId);
 
   const [completionsResult, taskLists] = await Promise.all([
-    db.from('completions').select('child_id,points_awarded').eq('completed_on', date),
-    Promise.all(children.map((c) => getVisibleTasks(c.id, date))),
+    db
+      .from('completions')
+      .select('child_id,points_awarded')
+      .eq('family_id', familyId)
+      .eq('completed_on', date),
+    Promise.all(children.map((c) => getVisibleTasks(familyId, c.id, date))),
   ]);
   if (completionsResult.error) throw completionsResult.error;
 
@@ -190,6 +234,7 @@ export async function getDayTotals(date: string): Promise<Record<string, DayTota
 
 /** Points per child for a calendar month, plus that month's perfect-day count. */
 export async function getMonthTotals(
+  familyId: string,
   year: number,
   month: number,
 ): Promise<Record<string, MonthTotal>> {
@@ -200,9 +245,15 @@ export async function getMonthTotals(
     db
       .from('completions')
       .select('child_id,points_awarded')
+      .eq('family_id', familyId)
       .gte('completed_on', start)
       .lte('completed_on', end),
-    db.from('perfect_days').select('child_id').gte('on_date', start).lte('on_date', end),
+    db
+      .from('perfect_days')
+      .select('child_id')
+      .eq('family_id', familyId)
+      .gte('on_date', start)
+      .lte('on_date', end),
   ]);
   if (completions.error) throw completions.error;
   if (perfect.error) throw perfect.error;
@@ -225,6 +276,7 @@ export async function getMonthTotals(
 
 /** Every perfect day for a child within a date range - powers the calendar grid. */
 export async function getPerfectDays(
+  familyId: string,
   childId: string,
   start: string,
   end: string,
@@ -233,6 +285,7 @@ export async function getPerfectDays(
   const { data, error } = await db
     .from('perfect_days')
     .select('on_date')
+    .eq('family_id', familyId)
     .eq('child_id', childId)
     .gte('on_date', start)
     .lte('on_date', end)
@@ -244,6 +297,7 @@ export async function getPerfectDays(
 
 /** Perfect days for every child in one range, keyed by child id. One round trip. */
 export async function getPerfectDaysByChild(
+  familyId: string,
   start: string,
   end: string,
 ): Promise<Record<string, string[]>> {
@@ -251,6 +305,7 @@ export async function getPerfectDaysByChild(
   const { data, error } = await db
     .from('perfect_days')
     .select('child_id,on_date')
+    .eq('family_id', familyId)
     .gte('on_date', start)
     .lte('on_date', end);
 
@@ -269,11 +324,15 @@ export async function getPerfectDaysByChild(
  * A streak can span months, so this cannot be derived from the month view - it
  * reads back from today until the first gap.
  */
-export async function getStreaksByChild(today: string): Promise<Record<string, number>> {
+export async function getStreaksByChild(
+  familyId: string,
+  today: string,
+): Promise<Record<string, number>> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('perfect_days')
     .select('child_id,on_date')
+    .eq('family_id', familyId)
     .lte('on_date', today)
     .order('on_date', { ascending: false })
     .limit(2000);
@@ -306,11 +365,16 @@ export async function getStreaksByChild(today: string): Promise<Record<string, n
  * anchor too - a streak should not read as broken at 09:00, before the child has
  * had any chance to do anything today.
  */
-export async function getPerfectDayStreak(childId: string, today: string): Promise<number> {
+export async function getPerfectDayStreak(
+  familyId: string,
+  childId: string,
+  today: string,
+): Promise<number> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('perfect_days')
     .select('on_date')
+    .eq('family_id', familyId)
     .eq('child_id', childId)
     .lte('on_date', today)
     .order('on_date', { ascending: false })
@@ -334,26 +398,32 @@ export async function getPerfectDayStreak(childId: string, today: string): Promi
  * this every 30 seconds indefinitely, so an N+1 here would quietly consume the
  * Supabase free tier.
  */
-export async function getTvBoardData(date: string): Promise<TvChild[]> {
+export async function getTvBoardData(familyId: string, date: string): Promise<TvChild[]> {
   const db = createServiceClient();
   const { start, end } = monthRange(Number(date.slice(0, 4)), Number(date.slice(5, 7)));
-  const children = await getActiveChildren();
+  const children = await getActiveChildren(familyId);
   if (children.length === 0) return [];
 
   // Four queries, regardless of how many children are on the board. The TV polls
   // this every 30 seconds forever, so the per-child loop that used to live here
   // was an N+1 that would quietly eat the Supabase free tier.
   const [today, month, perfect, tasks] = await Promise.all([
-    db.from('completions').select('child_id,points_awarded').eq('completed_on', date),
     db
       .from('completions')
       .select('child_id,points_awarded')
+      .eq('family_id', familyId)
+      .eq('completed_on', date),
+    db
+      .from('completions')
+      .select('child_id,points_awarded')
+      .eq('family_id', familyId)
       .gte('completed_on', start)
       .lte('completed_on', end),
-    db.from('perfect_days').select('child_id').eq('on_date', date),
+    db.from('perfect_days').select('child_id').eq('family_id', familyId).eq('on_date', date),
     db
       .from('tasks')
       .select('id,child_id')
+      .eq('family_id', familyId)
       .eq('is_active', true)
       .or(`on_date.is.null,on_date.eq.${date}`)
       .lte('created_on', date),
@@ -371,7 +441,10 @@ export async function getTvBoardData(date: string): Promise<TvChild[]> {
   const extrasByChild = new Map<string, number>();
   for (const task of tasks.data ?? []) {
     if (task.child_id) {
-      extrasByChild.set(task.child_id as string, (extrasByChild.get(task.child_id as string) ?? 0) + 1);
+      extrasByChild.set(
+        task.child_id as string,
+        (extrasByChild.get(task.child_id as string) ?? 0) + 1,
+      );
     }
   }
 
@@ -405,11 +478,15 @@ export async function getTvBoardData(date: string): Promise<TvChild[]> {
 }
 
 /** Most recent completion, for the TV activity strip. */
-export async function getLatestCompletion(date: string): Promise<LatestCompletion | null> {
+export async function getLatestCompletion(
+  familyId: string,
+  date: string,
+): Promise<LatestCompletion | null> {
   const db = createServiceClient();
   const { data, error } = await db
     .from('completions')
     .select('created_at,points_awarded,children(name,color),tasks(title,icon)')
+    .eq('family_id', familyId)
     .eq('completed_on', date)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -430,4 +507,24 @@ export async function getLatestCompletion(date: string): Promise<LatestCompletio
     points: data.points_awarded as number,
     at: data.created_at as string,
   };
+}
+
+/**
+ * Whether this family has chosen a parent PIN yet.
+ *
+ * A family created by a fresh Google sign-in has none, and the parent zone shows
+ * "choose a PIN" instead of "enter your PIN". Before multi-tenancy the PIN was
+ * planted by `npm run seed`, which no new user will ever run.
+ */
+export async function hasParentPin(familyId: string): Promise<boolean> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from('settings')
+    .select('key')
+    .eq('family_id', familyId)
+    .eq('key', 'parent_pin_hash')
+    .maybeSingle();
+
+  if (error) throw error;
+  return data !== null;
 }

@@ -1,6 +1,7 @@
 import TvBoard from '@/components/TvBoard';
 import TvStage from '@/components/TvStage';
 import { getLatestCompletion, getTvBoardData } from '@/lib/queries';
+import { requireFamily } from '@/lib/session';
 import { currentSlot, todayInKarachi } from '@/lib/dates';
 
 // Never cached, never prerendered: this is a live view of a shared database.
@@ -13,10 +14,11 @@ export const metadata = {
 };
 
 export default async function TvPage() {
+  const { familyId } = await requireFamily();
   const date = todayInKarachi();
   const [children, latest] = await Promise.all([
-    getTvBoardData(date),
-    getLatestCompletion(date),
+    getTvBoardData(familyId, date),
+    getLatestCompletion(familyId, date),
   ]);
 
   return (

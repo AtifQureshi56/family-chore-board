@@ -3,17 +3,55 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { verifyPin } from '@/app/actions/verifyPin';
+import { setInitialPin, verifyPin } from '@/app/actions/verifyPin';
 
-/** Four-digit numeric entry. Big keys - a parent uses this one-handed. */
-export default function PinGate() {
+type Mode = 'enter' | 'create';
+
+/**
+ * Four-digit numeric entry. Big keys - a parent uses this one-handed.
+ *
+ * In `create` mode the family has signed in but has not chosen a PIN yet, so the
+ * same keypad collects it twice and sets it. Before families existed the PIN was
+ * planted by `npm run seed`; a parent arriving from Google has never run that,
+ * and a locked parent zone with no way in would be the end of the sign-up.
+ */
+export default function PinGate({ mode = 'enter' }: { mode?: Mode }) {
   const [pin, setPin] = useState('');
+  const [first, setFirst] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
+  const confirming = mode === 'create' && first !== null;
+
   const submit = (value: string) => {
     startTransition(async () => {
+      if (mode === 'create') {
+        if (first === null) {
+          // First of two entries: remember it and ask again rather than setting a
+          // PIN the parent may have mistyped and can never guess back.
+          setFirst(value);
+          setPin('');
+          return;
+        }
+        if (value !== first) {
+          setError('Those two PINs did not match. Start again.');
+          setFirst(null);
+          setPin('');
+          return;
+        }
+
+        const result = await setInitialPin(value);
+        if (result.ok) {
+          router.refresh();
+        } else {
+          setError(result.error ?? 'Could not set that PIN.');
+          setFirst(null);
+          setPin('');
+        }
+        return;
+      }
+
       const result = await verifyPin(value);
       if (result.ok) {
         router.refresh();
@@ -32,14 +70,28 @@ export default function PinGate() {
     if (next.length === 4) submit(next);
   };
 
+  const heading =
+    mode === 'create'
+      ? confirming
+        ? 'Type it once more'
+        : 'Choose a parent PIN'
+      : 'Parents only';
+
+  const subheading =
+    mode === 'create'
+      ? confirming
+        ? 'Just to be sure you will remember it'
+        : 'Four digits. It keeps the children out of the chore editor on a shared tablet.'
+      : 'Enter the 4-digit PIN';
+
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-center justify-center gap-8 p-6">
       <header className="flex flex-col items-center gap-2 text-center">
         <span className="text-6xl" aria-hidden="true">
-          🔒
+          {mode === 'create' ? '🔑' : '🔒'}
         </span>
-        <h1 className="text-3xl font-black">Parents only</h1>
-        <p className="font-semibold text-muted">Enter the 4-digit PIN</p>
+        <h1 className="text-3xl font-black">{heading}</h1>
+        <p className="font-semibold text-muted">{subheading}</p>
       </header>
 
       <div className="flex gap-3" aria-label={`${pin.length} of 4 digits entered`}>
