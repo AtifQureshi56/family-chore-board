@@ -1,62 +1,27 @@
-'use client';
-
-import { useState, useTransition } from 'react';
-import { createBrowserClient } from '@/lib/supabase';
+import Link from 'next/link';
 
 /**
  * Google sign-in.
  *
- * The redirect target is built from window.location.origin rather than an env
- * var so that localhost, a Vercel preview and production all send the parent
- * back to the deployment they actually started from. Each of those origins still
- * has to be listed as a redirect URL in the Supabase dashboard.
+ * Deliberately a link, not a button with a click handler. The redirect to Google
+ * is started by /auth/signin on the server, so the tap is an ordinary navigation
+ * that no browser has cause to block and that works before - or without - any
+ * JavaScript. The mobile failure this replaced was a click handler whose
+ * navigation happened a tick after the tap and was silently dropped.
  */
 export default function SignInButtons({ next }: { next?: string }) {
-  const [error, setError] = useState<string | null>(null);
-  const [pending, startTransition] = useTransition();
-
-  const signIn = () => {
-    setError(null);
-    startTransition(async () => {
-      try {
-        const supabase = createBrowserClient();
-        const callback = new URL('/auth/callback', window.location.origin);
-        if (next) callback.searchParams.set('next', next);
-
-        const { error: authError } = await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo: callback.toString(),
-            // Google reuses the last account silently unless asked. On a shared
-            // tablet - or a parent adding a second family - that means signing in
-            // as somebody else without ever being offered the choice.
-            queryParams: { prompt: 'select_account' },
-          },
-        });
-        if (authError) setError(authError.message);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Could not start sign-in.');
-      }
-    });
-  };
+  const href = next ? `/auth/signin?next=${encodeURIComponent(next)}` : '/auth/signin';
 
   return (
     <div className="flex w-full flex-col gap-4">
-      <button
-        type="button"
-        onClick={signIn}
-        disabled={pending}
-        className="flex h-16 w-full items-center justify-center gap-3 rounded-2xl bg-surface text-lg font-black shadow-sm ring-1 ring-black/10 active:scale-[0.98] disabled:opacity-60"
+      <Link
+        href={href}
+        prefetch={false}
+        className="flex h-16 w-full items-center justify-center gap-3 rounded-2xl bg-surface text-lg font-black shadow-sm ring-1 ring-black/10 active:scale-[0.98]"
       >
         <GoogleMark />
-        {pending ? 'Opening Google…' : 'Continue with Google'}
-      </button>
-
-      {error && (
-        <p role="alert" className="text-center font-bold text-amber-700">
-          {error}
-        </p>
-      )}
+        Continue with Google
+      </Link>
     </div>
   );
 }
