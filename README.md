@@ -34,6 +34,12 @@ a date outside `lib/dates.ts`.
    | `0002_grants_and_rls.sql` | Grants and row-level security |
    | `0003_families_and_auth.sql` | Families, sign-in, and `family_id` on every table |
    | `0004_claim_family.sql` | The function that sets up a family on first sign-in |
+   | `0005_default_chore_icons.sql` | Repairs the default chore icons, and makes them encoding-proof |
+
+   Paste from a UTF-8 view of the file. `0004` carried emoji as literal characters,
+   and an editor that read the file as Windows-1252 turned every default chore icon
+   into gibberish on the way in. `0005` repairs those rows and rewrites the icons as
+   Unicode code points, so the file is now pure ASCII and cannot be mangled again.
 
    `0003` is safe to run on a database that already has children and chores in it:
    everything already there is gathered into one family and marked *claimable*, and
